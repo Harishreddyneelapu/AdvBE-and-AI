@@ -1,0 +1,54 @@
+services:
+  redis:
+    image: redis:7
+    ports:
+      - 6379:6379
+
+  nginx:
+    image: nginx
+    depends_on:
+      - server1
+      - server2
+      - server3
+    restart: on-failure
+    ports:
+      - "8000:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+
+  server1:
+    build: ./server
+    depends_on:
+      - redis
+    env_file:
+      - ./server/.env
+    environment:
+      - SERVER_NAME=server1
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - 5001:7000
+
+  server2:
+    build: ./server
+    depends_on:
+      - redis
+    env_file:
+      - ./server/.env
+    environment:
+      - SERVER_NAME=server2
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - 5002:7000
+
+
+  server3:
+    build: ./server
+    depends_on:
+      - redis
+    env_file:
+      - ./server/.env
+    environment:
+      - SERVER_NAME=server3
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - 5003:7000
