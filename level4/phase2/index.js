@@ -3,10 +3,12 @@ import dotenv from "dotenv";
 import {ChatGroq} from "@langchain/groq"; 
 import fs from "fs";
 import { PDFParse } from "pdf-parse";
+
 import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
-
-
-
+import { TaskType } from "@google/generative-ai";
+import { QdrantVectorStore } from "@langchain/qdrant";
+import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
+import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -21,56 +23,47 @@ const llm = new ChatGroq({
     maxRetries: 2
 });
 
+const embeddings = new GoogleGenerativeAIEmbeddings({
+  model: "gemini-embedding-001", // 768 dimensions
+  taskType: TaskType.RETRIEVAL_DOCUMENT,
+});
+
+ 
+const vectorStore = await QdrantVectorStore.fromExistingCollection(embeddings, {
+  url: process.env.QDRANT_URL,
+  apiKey: process.env.QDRANT_API_KEY,
+  collectionName: "knowledge",
+});
+
 const upload = async (req, res) => {
     const pdfPath = "./knowledge.pdf";
     const buffer = fs.readFileSync(pdfPath);
     const pdfResult = new PDFParse({data: buffer});
     const result = await pdfResult.getText();
-    const text 
-    return result;
+    const text = result.text;
+    const splitter = new RecursiveCharacterTextSplitter({
+        chunkSize: 1000,
+        chunkOverlap: 200,
+    });
+    const docs = await splitter.createDocuments([text]);
+    await vectorStore.addDocuments(docs);
+};
+
+const {count} = await vectorStore.client.count("knowledge");
+if (count === 0) {
+    await upload();
+    console.log("Indexed PDF into Qdrant");
 }
-const embeddings = new GoogleGenerativeAIEmbeddings({
-    model: "gemini-embedding-001",
-    apiKey: process.env.GOOGLE_API_KEY,
-});
-let pages = [];
-const cosine = (a, b) => {
-    let dot = 0, na = 0, nb = 0;
-    for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] ** 2; nb += b[i] ** 2; }
-    return dot / (Math.sqrt(na) * Math.sqrt(nb));
-};
-const topPages = async (question, n = 4) => {
-    const q = await embeddings.embedQuery(question);
-    return pages
-        .map((p) => ({...p, score: cosine(q, p.vector)}))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, n)
-        .sort((a, b) => a.num - b.num);
-};
-upload().then(async (result) => {
-    const vectors = await embeddings.embedDocuments(result.pages.map((p) => p.text));
-    pages = result.pages.map((p, i) => ({num: p.num, text: p.text, vector: vectors[i]}));
-    console.log(`PDF extracted: ${pages.length} pages`);
-}).catch((error) => {
-    console.error("Error extracting PDF text:", error);
-});
 
 app.post("/ai", async (req, res) => {
-    try {
-        const {input} = req.body;
-        if (!pages.length) return res.status(503).json({error: "Knowledge base is still loading, try again in a few seconds."});
-        const context = (await topPages(input)).map((p) => `[Page ${p.num}]\n${p.text.slice(0, 3000)}`).join("\n\n");
-        const response = await llm.invoke([
-            {role: "system", content: "You are a helpful assistant jarvis. Answer in short plain text using only this knowledge base. If the answer is not in it, say you don't know.\n\n" + context},
-            {role: "user", content: input},
-        ]);
-        const text = String(response.content)
-            .replace(/[    ]/g, " ")
-            .replace(/[‐-―‑]/g, "-");
-        return res.status(200).json({ai: text});
-    } catch (e) {
-        return res.status(e.status || 500).json({error: e.message});
-    }
+   const {input} = req.body;
+const docs = await vectorStore.similaritySearch(input, 5);
+const context = docs.map((doc) => doc.pageContent).join("\n");
+const response = await llm.invoke([
+    new SystemMessage("You are a helpful assistant that answers questions based on the provided context. don't make up answers. If the answer is not in the context, say 'I don't know'. if answer is not in the context, say 'I don't know'."),
+    new HumanMessage(`Answer the question based on the context below:\n\nContext:\n${context}\n\nQuestion:\n${input}`)
+])
+return res.json({response});    
 });
 
 
